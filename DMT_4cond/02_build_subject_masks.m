@@ -1,0 +1,166 @@
+%% Step 2 of 6: Creating mask per subject and group (Both Hemispheres)
+% Script for creating a mask covering NaN regions per individual and group
+
+addpath('/.../1_Scripts/DMT_4cond/0_Obtaining_Raw_NMs/script_variabs&files')
+
+% Step 1: Prepare data and regular grid
+% Loading variables and setting coordinates for the grid
+downSRate = 2;                        % Downsample the re-interpolation
+
+% LH coordinates
+xCord = -250:downSRate:250;
+yCord = -150:downSRate:200;
+posValid = gifti('Glasser360.L.flat.32k_fs_LR.surf.gii');
+% RH coordinates
+% xCord = -260:downSRate:240; 
+% yCord = -180:downSRate:170;
+% posValid = gifti('Glasser360.R.flat.32k_fs_LR.surf.gii');
+
+% Indices over grid kij(i,j)
+Ni=size(yCord,2);   % Number rows
+Nj=size(xCord,2);   % Number columns
+x = double(posValid.vertices(:,1));
+y = double(posValid.vertices(:,2));
+
+k = alphaShape(x,y,4) ;
+[a, b] = k.boundaryFacets();
+bw = poly2mask(b(:,1)-min(xCord)+1,b(:,2)-min(yCord)+1,max(yCord)-min(yCord)+1,...
+    max(xCord)-min(xCord)+1);
+mask = double(bw(1:downSRate:end,1:downSRate:end)) ;
+mask(mask==0) = nan ;
+[X,Y] = meshgrid(xCord, yCord);
+fprintf('Mask created')
+
+% k-index on grid vertices
+Nneigh=8; % Number neighbours per center-vertex
+kij=reshape(1:(Ni*Nj),Nj,Ni)'; % CAREFUL transposed for L2R reading, NixNj changed
+
+% Step 2: Ready to run mask 
+NGROUP=4;
+NSUB_ok=17; 
+subsOK=nan(NGROUP,NSUB_ok);
+maskij=kij.*mask;
+group_names=cell(1,4); group_names{1,1}='Pre_PCB'; group_names{1,2}='Post_PCB'; group_names{1,3}='Pre_DMT'; group_names{1,4}='Post_DMT';
+[i0 j0] = find(X==0 & Y==0);
+%% CHECK indiv recording MASK (from vphase)
+for g=1:NGROUP
+    g
+    nsub=0;
+    figure;
+    for sub=1:NSUB_ok
+        sub
+        % LOAD Vx, Vy
+        if g==1
+            if sub<10
+                file_name1 = join(['Subj0',num2str(sub),'_pre_PCB_left_LH.mat']);
+            elseif sub>=10
+                file_name1 = join(['Subj',num2str(sub),'_pre_PCB_left_LH.mat']);
+            end
+        elseif g==2
+            if sub<10
+                file_name1 = join(['Subj0',num2str(sub),'_post_PCB_left_LH.mat']);
+            elseif sub>=10
+                file_name1 = join(['Subj',num2str(sub),'_post_PCB_left_LH.mat']);
+            end
+        elseif g==3
+            if sub<10
+                file_name1 = join(['Subj0',num2str(sub),'_pre_DMT_left_LH.mat']);
+            elseif sub>=10
+                file_name1 = join(['Subj',num2str(sub),'_pre_DMT_left_LH.mat']);
+            end
+        elseif g==4
+            if sub<10
+                file_name1 = join(['Subj0',num2str(sub),'_post_DMT_left_LH.mat']);
+            elseif sub>=10
+                file_name1 = join(['Subj',num2str(sub),'_post_DMT_left_LH.mat']);
+            end
+        end
+        if exist(file_name1, 'file') == 2
+            load(file_name1)
+            nsub=nsub+1;
+            subsOK(g,nsub)=sub;
+        else
+            % Skip to the next iteration if file does not exist
+            fprintf('File not found: %s. Skipping...\n', file_name1);
+            continue;
+        end
+        % Compute average in time
+        Vx = squeeze(mean(vPhaseX,3));
+        Vy = squeeze(mean(vPhaseY,3));
+        % Compute MODULE
+        v_flowmap = sqrt(Vx.^2 + Vy.^2);
+        % MASK valid positions
+        inf_grid = NaN(Ni,Nj);
+        mask_sub = mask;
+        for i=1:Ni
+            for j=1:Nj
+               k=maskij(i,j);
+               if ~isnan(k)
+                   if isnan(v_flowmap(i,j))
+                       mask_sub(i,j) = NaN;
+                   end
+               end
+            end
+        end
+        mask_subs(g,nsub,:,:) = mask_sub;
+        if nsub<=20
+            subplot(4,5,nsub)
+            imagesc(mask_sub); axis xy; title(num2str(sub))
+        end
+    end
+    sgtitle(['Individual mask, ',group_names{g}])
+end
+
+
+%% parameters
+r2 = 1;   % radius for mask_sub2 (your current "border removal")
+r3 = 2;   % radius for mask_sub3 (your current "double border removal")
+r_extra = 3; % extra radius to remove around (i0, j0) for both masks
+
+for g = 1:NGROUP
+    nsub = 0;
+    for sub = 1:NSUB_ok
+        nsub = nsub + 1;
+
+        mask_sub  = squeeze(mask_subs(g,sub,:,:));
+        mask_sub2 = mask_sub;
+        mask_sub3 = mask_sub;
+
+        % centers where we want to expand NaNs:
+        % (group has data, subject lacks data)
+        centers = ~isnan(mask) & isnan(mask_sub);
+
+        % dilate to desired radii (Chebyshev/square neighborhood)
+        se2 = strel('square', 2*r2+1);      % radius r2
+        se3 = strel('square', 2*r3+1);      % radius r3
+        grow2 = imdilate(centers, se2);
+        grow3 = imdilate(centers, se3);
+
+        % apply to masks
+        mask_sub2(grow2) = NaN;
+        mask_sub3(grow3) = NaN;
+
+        % --- EXTRA: remove a radius-3 box around (i0, j0) in BOTH masks ---
+        rr = max(1, i0 - r_extra) : min(Ni, i0 + r_extra);
+        cc = max(1, j0 - r_extra) : min(Nj, j0 + r_extra);
+        mask_sub2(rr, cc) = NaN;
+        mask_sub3(rr, cc) = NaN;
+
+        % plots and storage
+        figure(3*(g-1)+1), subplot(4,5,nsub), imagesc(mask_sub);  axis xy
+        figure(3*(g-1)+2), subplot(4,5,nsub), imagesc(mask_sub2); axis xy
+        mask_subs2(g,sub,:,:) = mask_sub2;
+        figure(3*(g-1)+3), subplot(4,5,nsub), imagesc(mask_sub3); axis xy
+        mask_subs3(g,sub,:,:) = mask_sub3;
+    end
+    figure(3*(g-1)+1); sgtitle(['Individual mask ',              group_names{g}])
+    figure(3*(g-1)+2); sgtitle(['Individual mask + border removal, ', group_names{g}])
+    figure(3*(g-1)+3); sgtitle(['Individual mask + double border removal, ', group_names{g}])
+end
+
+%% SAVE MASKS
+% output_path = '/media/user-cbc/Data/PhD/Projects/DMT_Experiece_Tracking_4GitHub/0_Data/DMT_4cond';
+% output_file = fullfile(output_path,'mask_subjects_LH.mat');
+% save(output_file,'mask_subs','mask_subs2','mask_subs3');
+
+% Updated: 22Sept2026
